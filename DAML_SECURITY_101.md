@@ -1,65 +1,43 @@
 # Daml Security 101
 
-## 1. Start With the Security Model
+Daml removes many low-level smart contract risks, but it cannot fix a bad
+security model. The most serious Daml issues usually involve authority, privacy,
+economic rules, or workflows that look correct but fail in edge cases.
 
-- List every party in the workflow.
-- Define which actions each party may authorize.
-- Define which contract data and transaction consequences each party may see.
-- Separate the core concepts in the
-  [Daml authorization model](https://docs.digitalasset.com/build/3.4/explanations/daml/daml-authorization.html):
-  - **Signatory:** authorizes contract creation and is a stakeholder.
-  - **Observer:** sees the contract but does not authorize its creation.
-  - **Controller:** authorizes a specific choice.
-- Draw the party and workflow model before implementing templates.
-- Review authorization and
-  [Canton ledger privacy](https://docs.digitalasset.com/build/3.4/explanations/canton/canton-ledger-privacy.html)
-  together because a workflow can be
-  correctly authorized and still expose sensitive data.
+## 1. Make Authority and Consent Clear
 
-### Simple Example
+- List every party and the exact actions that party may take.
+- Keep these roles separate:
+  - A **signatory** approves the contract and is a stakeholder.
+  - An **observer** can see the contract.
+  - A **controller** approves a specific choice.
+- Take controllers from trusted contract fields, not from caller input.
+- Review every choice before asking a party to become a signatory.
+- Use a
+  [propose-and-accept workflow](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/develop/patterns/propose-accept.html)
+  when both parties must agree.
+- Check who can archive a contract and whether archival removes another party's
+  rights.
+- Avoid broad delegation such as a generic "act as this party" choice.
 
-- Write the intended policy before writing the template:
+The SCAS article on
+[common Daml vulnerabilities](https://scauditstudio.com/blog/DamlSmartContractVulnerabilities)
+shows how weak signatories, caller-controlled choices, and broad delegation can
+turn valid Daml code into an unsafe workflow.
 
-```text
-Owner:
-- Can create and withdraw from the vault.
-- Can see the balance.
-
-Auditor:
-- Can see the vault.
-- Cannot withdraw or change the owner.
-
-Unrelated party:
-- Cannot see or exercise the vault.
-```
-
-## 2. Bind Controllers to Trusted Contract Data
-
-- Prefer controllers derived from template fields, following established
-  [authorization patterns](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/develop/patterns/authorization.html).
-- Do not let a caller nominate the party that authorizes a sensitive choice.
-- If a flexible controller is required:
-  - Check it against an allowlist or trusted role.
-  - Bind it to a party already recorded in contract state.
-  - Add a clear assertion explaining the policy.
-- Test every choice using an unauthorized party.
-- Treat contract visibility and exercise authority as different properties.
-
-### Simple Example
-
-- Risky: the caller supplies the controller.
+- **Risky example:** the caller chooses who authorizes the withdrawal.
 
 ```daml
-choice Withdraw : ContractId Vault
+choice Withdraw : ()
   with
     requestor : Party
     amount : Decimal
   controller requestor
   do
-    create this with balance = balance - amount
+    pure ()
 ```
 
-- Safer: authority comes from the contract.
+- **Safer example:** the contract defines the authorized party.
 
 ```daml
 choice Withdraw : ContractId Vault
@@ -67,64 +45,33 @@ choice Withdraw : ContractId Vault
     amount : Decimal
   controller owner
   do
-    assertMsg "Invalid withdrawal" (amount > 0.0 && amount <= balance)
+    assertMsg "Invalid amount" (amount > 0.0 && amount <= balance)
     create this with balance = balance - amount
 ```
 
-## 3. Make Consent Explicit
+## 2. Treat Privacy as a Core Security Rule
 
-- Remember that signatories provide authority to the contract.
-- Review every choice before accepting a signatory role.
-- Check which party can archive the contract.
-- Check whether archival can remove another party's rights.
-- Use the
-  [propose-and-accept pattern](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/develop/patterns/propose-accept.html)
-  when multiple parties must consent.
-- Require explicit acceptance for:
-  - Transfers.
-  - Material term changes.
-  - New obligations.
-  - Contract upgrades.
-- Avoid treating an observer role as protection against unilateral archival.
+- An observer can see the full contract payload, not only selected fields.
+- Keep observer lists as small as possible.
+- Trace privacy through nested `fetch`, `exercise`, and `create` operations.
+- Check who learns data from the full transaction, not only the top-level
+  contract.
+- Treat prices, balances, counterparties, account IDs, and business terms as
+  private unless they are intentionally public.
+- Split one large contract into smaller contracts when different parties need
+  different data.
+- Make sure the web API and logs do not expose more data than the Daml model.
+- Test with parties that have partial visibility, not only administrators.
 
-### Simple Example
+Privacy is especially important on Canton. Our
+[Daml vulnerability research](https://scauditstudio.com/blog/DamlSmartContractVulnerabilities)
+explains how transaction structure and disclosure can reveal data to a party
+that was not meant to receive it. The
+[EVM-to-Canton guide](https://scauditstudio.com/blog/EVMtoCantonGuide) also
+explains why public-chain privacy assumptions do not transfer cleanly to
+Canton.
 
-- Model an offer separately from the accepted agreement:
-
-```daml
-template Offer
-  with
-    seller : Party
-    buyer : Party
-    amount : Decimal
-  where
-    signatory seller
-    observer buyer
-
-    choice Accept : ContractId Agreement
-      controller buyer
-      do
-        create Agreement with ..
-```
-
-## 4. Trace Privacy Through the Entire Transaction
-
-- Keep observer lists minimal under Canton's
-  [privacy model](https://docs.digitalasset.com/build/3.4/explanations/canton/canton-ledger-privacy.html).
-- Add an observer only when the party needs the complete contract payload.
-- Trace nested `fetch`, `exercise`, and `create` operations, including any use
-  of
-  [explicit contract disclosure](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html).
-- Review who learns data through the complete transaction tree.
-- Avoid combining unrelated privacy scopes in one transaction.
-- Split contracts when different audiences need different fields.
-- Treat pricing, counterparties, balances, and identifiers as sensitive unless
-  the business model says otherwise.
-- Test workflows using realistic partial visibility.
-
-### Simple Example
-
-- Keep private terms separate from a broadly visible status:
+- **Simple pattern:** separate private trade terms from public status.
 
 ```daml
 template TradeTerms
@@ -145,24 +92,29 @@ template TradeStatus
     observer viewers
 ```
 
-## 5. Protect State Transitions and Invariants
+## 3. Prove the Economic Model
 
-- Use consuming choices for one-time rights and state replacement.
-- Use nonconsuming choices only when repeated execution is intentional.
-- Put permanent contract-state
-  [constraints](https://docs.digitalasset.com/build/3.4/tutorials/smart-contracts/constraints.html)
-  in `ensure`.
-- Validate choice inputs with `assert` or `assertMsg`.
-- Reject:
-  - Zero or negative amounts where not meaningful.
-  - Amounts above balances or limits.
-  - Self-dealing where roles must differ.
-  - Empty or duplicate identifiers.
-  - Invalid rates and deadlines.
-- Re-check invariants whenever a choice creates replacement contracts.
-- Assert conservation after transfers, splits, merges, minting, and burning.
+- Write the economic rules before writing the choices.
+- Put permanent state rules in `ensure`.
+- Validate choice inputs with `assertMsg`.
+- Use consuming choices for one-time rights, redemptions, and state changes.
+- Reject zero, negative, oversized, duplicate, and self-dealing inputs.
+- Define units for every number.
+- Define how fees and shares are rounded.
+- Multiply before dividing when early division would lose precision.
+- Check conservation after minting, burning, splitting, merging, and transfers.
+- Test whether repeating or splitting an operation creates extra value.
+- Treat contract keys and concurrent submissions as part of the economic model.
 
-### Simple Example
+Incorrect economic models are a recurring audit issue. Code can compile and
+still create value from rounding, allow repeated redemption, or accept invalid
+states. Our guides on
+[writing correct Daml contracts](https://scauditstudio.com/blog/Writing-Correct-Daml-Contracts-on-Canton)
+and
+[writing a token contract](https://scauditstudio.com/blog/WritingTokenContractInDAML)
+show how to make these rules explicit.
+
+- **Simple example:** protect amount and conservation rules.
 
 ```daml
 template Token
@@ -180,363 +132,97 @@ template Token
       controller owner
       do
         assertMsg "Split must be positive" (splitAmount > 0.0)
-        assertMsg "Split exceeds balance" (splitAmount < amount)
+        assertMsg "Split must be below balance" (splitAmount < amount)
         left <- create this with amount = splitAmount
         right <- create this with amount = amount - splitAmount
         pure (left, right)
 ```
 
-## 6. Treat Contract Keys as Scoped Coordination
+## 4. Review AI-Generated Code as Untrusted Code
 
-- Derive
-  [contract-key](https://docs.digitalasset.com/build/3.4/reference/daml/contract-keys.html)
-  maintainers from the key itself.
-- Make every maintainer a signatory.
-- Document which parties can resolve each key.
-- Do not interpret an invisible lookup result as proof that no contract exists.
-- Handle concurrent submissions explicitly.
-- Do not assume contract-key uniqueness is a universal global database
-  constraint.
-- Use a consuming coordination contract when competing creations must be
-  serialized.
-- Use
-  [command deduplication](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/command-deduplication.html)
-  and application idempotency for retried submissions.
+- Do not assume AI understands the business agreement behind a template.
+- Give every AI-generated change a named human owner.
+- Review every generated `signatory`, `observer`, `controller`, `ensure`, and
+  `nonconsuming` line.
+- Look for made-up APIs, outdated Daml syntax, and code that only appears
+  correct.
+- Check whether AI added a caller-controlled party or a broad observer list.
+- Check whether AI changed a consuming choice into a repeatable choice.
+- Do not paste private contracts, credentials, customer data, or audit findings
+  into unapproved AI tools.
+- Require tests written from the business rules, not tests that only confirm the
+  generated implementation.
+- Use AI to support review, never as the final reviewer.
 
-### Simple Example
+SCAS discusses this problem in
+[AI and Formal Verification in DeFi](https://scauditstudio.com/blog/AI-and-Formal-Verification-In-Defi):
+automation can help, but it does not prove that the product requirements or
+economic model are correct. Our
+[correct Daml contracts article](https://scauditstudio.com/blog/Writing-Correct-Daml-Contracts-on-Canton)
+also highlights mistakes that compile cleanly but fail at the workflow level.
 
-- Include the maintaining party in the key:
+- **AI review prompt for humans:**
 
-```daml
-template Account
-  with
-    bank : Party
-    accountNumber : Text
-    owner : Party
-  where
-    signatory bank
-    observer owner
-    key (bank, accountNumber) : (Party, Text)
-    maintainer key._1
+```text
+For every changed template:
+- Who can create it?
+- Who can see it?
+- Who can exercise each choice?
+- Can any action be repeated?
+- Can any value become negative or increase unexpectedly?
+- Does the code match the written business rule?
 ```
 
-## 7. Bound Time, Delegation, and Upgrades
+## 5. Test the Full Workflow, Not Only the Contract
 
-- Treat
-  [ledger time](https://docs.digitalasset.com/build/3.4/explanations/daml/daml-time.html)
-  as an input with an allowed tolerance.
-- Test exactly at deadline boundaries.
-- Avoid placing a high-value decision on a single exact timestamp.
-- Scope
-  [delegated authority](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/develop/patterns/delegation.html)
-  by:
-  - Allowed action.
-  - Allowed target.
-  - Expiration time.
-  - Maximum delegation depth.
-- Avoid generic `ExecuteAs` or unrestricted recursive delegation.
-- Require affected parties to accept material
-  [smart contract upgrades](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/upgrade/smart-contract-upgrades.html).
-- Test stale contract references.
-- Test workflows that involve multiple package versions.
-- Document the emergency path for disabling or replacing a broken workflow.
-
-### Simple Example
-
-- Bound recursive delegation:
-
-```daml
-template DelegatedRight
-  with
-    owner : Party
-    delegate : Party
-    remainingDepth : Int
-  where
-    signatory owner
-    observer delegate
-    ensure remainingDepth >= 0
-
-    choice SubDelegate : ContractId DelegatedRight
-      with newDelegate : Party
-      controller delegate
-      do
-        assertMsg "Delegation depth exceeded" (remainingDepth > 0)
-        create this with
-          delegate = newDelegate
-          remainingDepth = remainingDepth - 1
-```
-
-## 8. Test Security Properties
-
-- Add a
-  [negative test](https://docs.digitalasset.com/build/3.4/tutorials/smart-contracts/tests.html)
-  for every authorization boundary.
-- Exercise every choice as the wrong party.
-- Test observer and non-observer visibility.
+- Add a negative test for every authorization rule.
+- Exercise every sensitive choice as the wrong party.
+- Test privacy with non-observers and partially informed parties.
 - Test zero, negative, maximum, duplicate, and boundary values.
-- Test concurrent and repeated submissions.
-- Test consuming and nonconsuming behavior.
-- Test conservation of value after every asset operation.
-- Test deadline behavior before, at, and after the boundary.
-- Keep test-only packages and credentials out of production releases.
-- Run [CantonGuard](https://github.com/SCAuditStudio/CantonGuard) as an
-  additional review pass.
-- Do not treat automated review as a replacement for manual security analysis.
-
-### Simple Example
-
-```daml
-unauthorizedWithdrawalMustFail = script do
-  owner <- allocateParty "Owner"
-  stranger <- allocateParty "Stranger"
-
-  vaultCid <- submit owner do
-    createCmd Vault with owner; balance = 100.0
-
-  submitMustFail stranger do
-    exerciseCmd vaultCid Withdraw with amount = 10.0
-```
-
-## 9. Protect the Application-to-Ledger Trust Boundary
-
-- Treat the application backend as part of the authorization system.
-- Do not accept `actAs`, `readAs`, party IDs, or command authority directly from
-  an untrusted client.
-- Resolve the authenticated application user to approved ledger rights through
-  [server-side application authorization](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/secure/authorization.html).
-- Give each service the minimum ledger rights required for its function.
-- Separate:
-  - Human user identities.
-  - Machine service identities.
-  - Administrative identities.
-  - Batch and automation identities.
-- Validate the final command payload immediately before submission.
-- Bind command IDs to the authenticated actor and business operation.
-- Use
+- Test repeated and concurrent submissions.
+- Test exactly at deadline boundaries.
+- Test old and new package versions together before an upgrade.
+- Keep test packages and test credentials out of production.
+- Map application users to ledger parties on the server.
+- Never accept `actAs`, `readAs`, or party authority directly from a browser.
+- Use stable operation IDs and
   [command deduplication](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/command-deduplication.html)
-  for retried operations.
-- Reject commands that reference contracts outside the user's authorized
-  business scope, even if the ledger would reject them later.
-- Record enough metadata to connect an application request to its ledger
-  submission and result.
+  for retries.
+- Confirm ledger completion before sending success notifications.
 
-### Simple Example
+Our
+[Canton audit service](https://scauditstudio.com/solutions/canton-audit)
+reviews the Daml model, application boundary, privacy design, and participant
+infrastructure together. The
+[writing correct Daml contracts](https://scauditstudio.com/blog/Writing-Correct-Daml-Contracts-on-Canton)
+article provides more examples of failure cases worth testing.
 
-```text
-Authenticated web user
-        |
-        v
-Application authorization policy
-        |
-        v
-Approved ledger party and command type
-        |
-        v
-Ledger API submission
-```
-
-- The browser proposes an action.
-- The server decides which party may authorize it.
-- The ledger independently enforces Daml authorization.
-
-## 10. Review Arithmetic and Economic Integrity
-
-- Daml's
-  [`Numeric` type](https://docs.digitalasset.com/build/3.4/reference/daml/stdlib/DA-Numeric.html)
-  prevents silent integer overflow, but it does not prevent incorrect
-  financial formulas.
-- Define units for every numeric field.
-- Avoid mixing:
-  - Percentages and decimal fractions.
-  - Minor and major currency units.
-  - Prices and quantities.
-  - Gross and net values.
-- Multiply before dividing when early division would lose precision.
-- Define a rounding policy for fees, interest, shares, and distributions.
-- Define who receives rounding remainders.
-- Reject division by zero before the calculation.
-- Bound rates, leverage, fees, slippage, and quantities.
-- Assert conservation where value should not be created or destroyed.
-- Test very small values, very large values, and repeated operations.
-- Check whether splitting and recombining an asset changes total value.
-
-### Simple Example
-
-- Risky:
+- **Simple negative test:**
 
 ```daml
--- Early division can produce the wrong allocation.
-share = (userStake / totalStake) * totalReward
+submitMustFail stranger do
+  exerciseCmd vaultCid Withdraw with amount = 10.0
 ```
-
-- Safer:
-
-```daml
-assertMsg "Total stake must be positive" (totalStake > 0.0)
-share = (userStake * totalReward) / totalStake
-```
-
-### Review Questions
-
-- Can a user gain value by splitting one operation into many small operations?
-- Can rounding repeatedly favor the same party?
-- Can a negative value reverse the intended direction of a transfer?
-- Does every mint, burn, split, merge, and settlement preserve its stated
-  invariant?
-
-## 11. Design Safe Interfaces and Package Boundaries
-
-- Treat an interface as a security contract between packages.
-- Document the authority and visibility assumptions of each interface choice.
-- Do not assume every implementation has the same signatories or observers.
-- Keep interface choices narrow and business-specific.
-- Avoid interfaces that expose generic arbitrary execution.
-- Review every package that can implement a trusted interface.
-- Pin and review
-  [package dependencies](https://docs.digitalasset.com/build/3.4/tutorials/smart-contracts/dependencies.html).
-- Do not upload test, experimental, or
-  [unreviewed DARs](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/build/how-to-build-dar-files.html)
-  to production.
-- Confirm that an application resolves the intended package and template
-  version.
-- Test mixed-version workflows when multiple package versions can coexist.
-- Treat package vetting and upload rights as privileged production operations.
-
-### Simple Example
-
-```text
-Transferable interface promise:
-- A controller may request a transfer.
-- The implementation must preserve quantity.
-- The receiver must explicitly accept when required.
-- The implementation must not disclose private terms to unrelated parties.
-```
-
-- The type signature alone does not express all four properties.
-- Tests and documentation must enforce the remaining security contract.
-
-## 12. Handle Failure, Exceptions, and Partial Workflows
-
-- Remember the
-  [Daml exception model](https://docs.digitalasset.com/build/3.4/tutorials/smart-contracts/exceptions.html):
-  a failed transaction is atomic and its ledger effects are not partially
-  committed.
-- Do not assume external side effects are rolled back with the ledger
-  transaction.
-- Keep email, payment, webhook, and database effects idempotent.
-- Send external notifications after confirming ledger completion.
-- Do not expose internal exception details to untrusted clients.
-- Distinguish:
-  - Business rejection.
-  - Authorization failure.
-  - Missing visibility.
-  - Contention or stale state.
-  - Temporary infrastructure failure.
-- Retry only errors known to be safe to retry.
-- Use stable operation IDs across retries.
-- Test workflows interrupted between off-ledger and on-ledger steps.
-- Design reconciliation jobs for operations that cross system boundaries.
-
-### Simple Example
-
-```text
-Unsafe order:
-1. Send "transfer complete" email.
-2. Submit ledger transfer.
-3. Ledger transfer fails.
-
-Safer order:
-1. Create operation ID.
-2. Submit ledger transfer with deduplication.
-3. Confirm completion.
-4. Send idempotent notification for that operation ID.
-```
-
-## 13. Plan Contract and Application Migrations
-
-- Inventory active templates before a
-  [smart contract upgrade](https://docs.digitalasset.com/build/3.4/sdlc-howtos/smart-contracts/upgrade/smart-contract-upgrades.html).
-- Define whether old contracts remain usable, are migrated, or are retired.
-- Preserve authorization and privacy properties across versions.
-- Require appropriate party consent when migration changes obligations.
-- Avoid silently broadening observer sets during migration.
-- Verify that keys remain unique and maintainers remain valid.
-- Test:
-  - Old application with old contracts.
-  - New application with old contracts.
-  - New application with new contracts.
-  - Mixed-version transactions.
-- Keep rollback and forward-fix procedures separate.
-- Do not delete old package dependencies while active contracts still require
-  them.
-- Monitor migration progress and unresolved contracts.
-- Re-run security tests against the final
-  [managed package set](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/manage-daml-packages.html).
-
-### Migration Checklist
-
-```text
-- Package reviewed and approved
-- Upgrade compatibility checked
-- Active-contract inventory captured
-- Party consent requirements documented
-- Privacy differences reviewed
-- Mixed-version tests passed
-- Rollback or forward-fix path tested
-- Production package hashes recorded
-```
-
-## 14. Perform a Structured Manual Review
-
-- Review the system by property, not only file by file, using
-  [CantonGuard](https://github.com/SCAuditStudio/CantonGuard) as a supporting
-  review pass.
-- Build these tables:
-  - Party and role matrix.
-  - Template signatory and observer matrix.
-  - Choice controller matrix.
-  - Asset and value-flow matrix.
-  - Contract-key and maintainer matrix.
-  - External integration matrix.
-- Trace every privileged choice from controller to final effects.
-- Trace every sensitive field to all parties that can observe it.
-- Identify all choices that create contracts using another party's authority.
-- Identify all nonconsuming choices and justify repeatability.
-- Identify every archive without a replacement.
-- Search for unbounded delegation, stale contract IDs, and caller-supplied
-  controllers.
-- Compare implementation behavior with product requirements and the documented
-  [Daml vulnerability patterns](https://github.com/SCAuditStudio/SCASArticles/blob/main/DamlSmartContractVulnerabilities.md).
-- Record assumptions that cannot be proven from code.
-- Review tests for missing negative and partial-visibility cases.
-
-### Minimal Review Table
-
-| Template | Choice | Controller | Assets affected | New authority | Privacy change |
-| --- | --- | --- | --- | --- | --- |
-| `Vault` | `Withdraw` | `owner` | Balance decreases | None | Receiver may learn amount |
-| `Offer` | `Accept` | `buyer` | Agreement created | Buyer becomes signatory | Seller and buyer see terms |
 
 ## Final Daml Checklist
 
 - [ ] Every party and role is documented.
 - [ ] Every signatory is necessary.
-- [ ] Every observer needs the complete payload.
-- [ ] Every controller is bound to trusted state.
-- [ ] Every flexible controller is validated.
+- [ ] Every observer needs the full contract payload.
+- [ ] Every controller comes from trusted contract state.
+- [ ] Every multi-party obligation uses clear consent.
+- [ ] No party can remove another party's rights unexpectedly.
+- [ ] Sensitive data has been traced through the full transaction.
+- [ ] Private and public data are separated where needed.
+- [ ] Every permanent state rule is enforced with `ensure`.
+- [ ] Every numeric input has clear bounds and units.
+- [ ] Rounding and conservation rules are tested.
 - [ ] Every one-time action is consuming.
-- [ ] Every state invariant is enforced.
-- [ ] Every numeric input is bounded.
-- [ ] Every key maintainer is derived from the key.
-- [ ] Every privacy-sensitive transaction tree is reviewed.
-- [ ] Every delegation is narrowly scoped.
-- [ ] Every upgrade requires appropriate consent.
-- [ ] Every security boundary has a negative test.
-- [ ] Application identities map to minimum ledger rights.
-- [ ] Command retries use deduplication and idempotency.
-- [ ] Arithmetic and rounding invariants are tested.
-- [ ] Package and interface trust assumptions are documented.
-- [ ] External side effects are reconciled with ledger completion.
-- [ ] Mixed-version and migration paths are tested.
-- [ ] A party, choice, privacy, key, and asset-flow review was completed.
-- [ ] CantonGuard and manual review have been completed.
+- [ ] Contract keys and concurrent submissions are handled safely.
+- [ ] AI-generated code received full human review.
+- [ ] Wrong-party and partial-visibility tests exist.
+- [ ] Repeated, concurrent, and boundary cases are tested.
+- [ ] Application users map to minimum ledger rights.
+- [ ] Package upgrades and mixed versions are tested.
+- [ ] SCAS research and current Digital Asset documentation were reviewed.
+- [ ] Manual security review was completed before production.
